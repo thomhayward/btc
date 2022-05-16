@@ -13,6 +13,8 @@ struct Args {
     interval: u64,
     #[clap(long)]
     config: String,
+    #[clap(long)]
+    dry_run: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,7 +99,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             spot: spot.amount.parse()?,
             timestamp: Utc::now(),
         };
-        submit_influx(&influx_config, &pd).await?;
+        if !args.dry_run {
+            submit_influx(&influx_config, &pd).await?;
+        } else {
+            println!("{}", pd);
+        }
     }
 }
 
