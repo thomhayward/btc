@@ -88,6 +88,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cb_default_headers = HeaderMap::new();
     cb_default_headers.insert("Accept", HeaderValue::from_static("application/json"));
     let cb_client = reqwest::Client::builder()
+        .use_rustls_tls()
+        .https_only(true)
         .default_headers(cb_default_headers)
         .gzip(true)
         .build()?;
@@ -128,8 +130,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn get_price(client: reqwest::Client, typ: PriceType, currency: &str) -> Result<Price, Box<dyn std::error::Error>> {
     let url = format!("https://api.coinbase.com/v2/prices/{}?currency={}", typ, currency);
     let response = client.get(url).send().await?;
-    let response = response.json::<ApiResponse>().await?;
-    Ok(response.data)
+    let body = response.json::<ApiResponse>().await?;
+    Ok(body.data)
 }
 
 async fn submit_influx(client: reqwest::Client, config: &InfluxConfig, price_data: &PriceData) -> Result<(), Box<dyn std::error::Error>> {
