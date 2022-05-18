@@ -1,10 +1,11 @@
-use std::fmt::Display;
-use chrono::Utc;
+use chrono::{Timelike, Utc};
 use clap::Parser;
 use config::Config;
 use futures::try_join;
 use reqwest::header::{HeaderMap, HeaderValue};
 use serde::Deserialize;
+use std::{fmt::Display, time::Duration};
+use tokio::time::Instant;
 
 #[derive(Parser, Debug)]
 struct Args {
@@ -20,7 +21,7 @@ struct Args {
 
 #[derive(Debug, Deserialize)]
 struct ApiResponse {
-    data: Price
+    data: Price,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,7 +34,7 @@ struct Price {
 enum PriceType {
     Buy,
     Sell,
-    Spot
+    Spot,
 }
 
 struct PriceData {
@@ -56,17 +57,31 @@ struct InfluxConfig {
 
 impl Display for PriceData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{},source={},currency={} buy={},sell={},spot={} {}", self.asset, self.source, self.currency, self.buy, self.sell, self.spot, self.timestamp.timestamp())
+        write!(
+            f,
+            "{},source={},currency={} buy={},sell={},spot={} {}",
+            self.asset,
+            self.source,
+            self.currency,
+            self.buy,
+            self.sell,
+            self.spot,
+            self.timestamp.timestamp()
+        )
     }
 }
 
 impl Display for PriceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", match self {
-            PriceType::Buy => "buy",
-            PriceType::Sell => "sell",
-            PriceType::Spot => "spot"
-        })
+        write!(
+            f,
+            "{}",
+            match self {
+                PriceType::Buy => "buy",
+                PriceType::Sell => "sell",
+                PriceType::Spot => "spot",
+            }
+        )
     }
 }
 
@@ -82,8 +97,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         org: config.get("org")?,
         token: config.get("token")?,
     };
-    let start = tokio::time::Instant::now();
-    let mut interval = tokio::time::interval_at(start, tokio::time::Duration::from_secs(args.interval));
+
+    let now = Utc::now();
+    let seconds: u64 = now.second().into(); // current seconds
+    let nanos = now.nanosecond();
+    let wait = (args.interval - ((seconds + args.interval) % args.interval)) % 60;
+    let start = Instant::now()
+        .checked_add(Duration::new(wait - 1, 1_000_000_000 - nanos))
+        .expect("Failed to set start");
+    let mut interval = tokio::time::interval_at(start, Duration::from_secs(args.interval));
 
     let mut cb_default_headers = HeaderMap::new();
     cb_default_headers.insert("Accept", HeaderValue::from_static("application/json"));
@@ -96,13 +118,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut if_default_headers = HeaderMap::new();
     if_default_headers.insert("Accept", HeaderValue::from_static("application/json"));
-    if_default_headers.insert("Content-Type", HeaderValue::from_static("text/plain; charset=utf-8"));
-    if_default_headers.insert("Authorization", HeaderValue::from_str(&format!("Token {}", influx_config.token))?);
+    if_default_headers.insert(
+        "Content-Type",
+        HeaderValue::from_static("text/plain; charset=utf-8"),
+    );
+    if_default_headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Token {}", influx_config.token))?,
+    );
     let if_client = reqwest::Client::builder()
         .default_headers(if_default_headers)
         .gzip(true)
         .build()?;
-    
+
     loop {
         interval.tick().await;
         let (buy, sell, spot) = try_join!(
@@ -127,15 +155,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-async fn get_price(client: reqwest::Client, typ: PriceType, currency: &str) -> Result<Price, Box<dyn std::error::Error>> {
-    let url = format!("https://api.coinbase.com/v2/prices/{}?currency={}", typ, currency);
+async fn get_price(
+    client: reqwest::Client,
+    typ: PriceType,
+    currency: &str,
+) -> Result<Price, Box<dyn std::error::Error>> {
+    let url = format!(
+        "https://api.coinbase.com/v2/prices/{}?currency={}",
+        typ, currency
+    );
     let response = client.get(url).send().await?;
     let body = response.json::<ApiResponse>().await?;
     Ok(body.data)
 }
 
-async fn submit_influx(client: reqwest::Client, config: &InfluxConfig, price_data: &PriceData) -> Result<(), Box<dyn std::error::Error>> {
-    let uri = format!("{}/api/v2/write?bucket={}&org={}&precision=s", config.host, config.bucket, config.org);
+async fn submit_influx(
+    client: reqwest::Client,
+    config: &InfluxConfig,
+    price_data: &PriceData,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let uri = format!(
+        "{}/api/v2/write?bucket={}&org={}&precision=s",
+        config.host, config.bucket, config.org
+    );
     let response = client
         .post(uri)
         .body(format!("{}", price_data))
